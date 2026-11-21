@@ -1,0 +1,38 @@
+name: Publish checked desktop installers
+on:
+  push:
+    branches: [main]
+    paths: ['checksums/v*.sha256']
+permissions:
+  contents: write
+concurrency: desktop-publication
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify staged installers and publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          manifest=$(ls checksums/v*.sha256 | sort -V | tail -1)
+          tag=$(basename "$manifest" .sha256)
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          version=${tag#v}
+          release=$(gh release view "$tag" --json databaseId,isDraft)
+          mkdir -p "$RUNNER_TEMP/installers"
+          cd "$RUNNER_TEMP/installers"
+          repo="$GITHUB_REPOSITORY"
+          release_id=$(jq -r .databaseId <<< "$release")
+          assets=$(gh api "repos/$repo/releases/$release_id/assets")
+          [[ $(jq length <<< "$assets") == 4 ]]
+          for name in "Rexi-$version-arm64.dmg" "Rexi-$version.dmg" "Rexi-Setup-$version.exe" SHA256SUMS.txt; do
+            id=$(jq -er --arg name "$name" '.[] | select(.name == $name and .state == "uploaded") | .id' <<< "$assets")
+            gh api -H 'Accept: application/octet-stream' "repos/$repo/releases/assets/$id" > "$name"
+          done
+          cmp "$GITHUB_WORKSPACE/$manifest" SHA256SUMS.txt
+          sha256sum --strict --check SHA256SUMS.txt
+          if [[ $(jq -r .isDraft <<< "$release") == true ]]; then
+            gh release edit "$tag" --repo "$repo" --target "$GITHUB_SHA" --draft=false --latest
+          fi
